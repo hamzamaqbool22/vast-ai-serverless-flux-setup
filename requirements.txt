@@ -1,0 +1,10 @@
+torch
+git+https://github.com/huggingface/diffusers.git
+transformers
+accelerate
+safetensors
+Pillow
+fastapi
+uvicorn
+vastai
+huggingface_hub
