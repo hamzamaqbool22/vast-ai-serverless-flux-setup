@@ -65,4 +65,4 @@ EXPOSE 18000
 # Start FastAPI + PyWorker
 # ============================================================
 
-CMD ["/app/start.sh"]
+ENTRYPOINT ["/app/start.sh"]
