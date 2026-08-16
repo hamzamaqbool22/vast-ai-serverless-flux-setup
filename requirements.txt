@@ -7,3 +7,4 @@ fastapi
 uvicorn
 vastai
 huggingface_hub
+python-multipart
