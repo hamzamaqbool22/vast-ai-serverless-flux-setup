@@ -1,45 +1,47 @@
+# #!/bin/bash
+
+# set -euo pipefail
+
+# export PYTHONUNBUFFERED=1
+
+# # Use the Vast image venv. Do not create another Python environment.
+# if [ -f /venv/main/bin/activate ]; then
+#   source /venv/main/bin/activate
+# fi
+
+# echo "Starting FLUX Serverless model server..."
+
+# rm -f /app/app.log
+# touch /app/app.log
+
+# cd /app
+
+# # PyWorker is started by Vast's serverless runtime, which injects
+# # WORKER_PORT, VAST_TCP_PORT_*, PUBLIC_IPADDR, CONTAINER_ID, and REPORT_ADDR.
+# # Starting worker.py from this image without those variables crashes the
+# # container in a restart loop (KeyError: WORKER_PORT).
+# #
+# # This script only starts FastAPI on 127.0.0.1:18000. Logs go to /app/app.log
+# # so PyWorker can detect VAST_MODEL_READY.
+
+# exec python3 -m uvicorn main:app \
+#     --host 127.0.0.1 \
+#     --port 18000 \
+#     >> /app/app.log 2>&1
+
+
 #!/bin/bash
 
-set -euo pipefail
+#!/bin/bash
 
-export PYTHONUNBUFFERED=1
+#!/bin/bash
 
-# Use the Vast image venv. Do not create another Python environment.
-if [ -f /venv/main/bin/activate ]; then
-  source /venv/main/bin/activate
-fi
+set -e
 
-echo "Starting FLUX Serverless worker..."
+echo "Starting FLUX model server..."
 
-rm -f /app/app.log
-touch /app/app.log
+source /venv/main/bin/activate
 
-cd /app
-
-echo "Starting FastAPI..."
-
-python3 -m uvicorn main:app \
+exec python3 -m uvicorn main:app \
     --host 127.0.0.1 \
-    --port 18000 \
-    >> /app/app.log 2>&1 &
-
-API_PID=$!
-
-cleanup() {
-  kill "${API_PID}" 2>/dev/null || true
-}
-
-trap cleanup EXIT INT TERM
-
-echo "FastAPI PID: ${API_PID}"
-
-sleep 2
-
-if ! kill -0 "${API_PID}" 2>/dev/null; then
-  echo "VAST_WORKER_FATAL: FastAPI failed to start" >> /app/app.log
-  exit 1
-fi
-
-echo "Starting Vast PyWorker..."
-
-python3 /app/worker.py
+    --port 18000
