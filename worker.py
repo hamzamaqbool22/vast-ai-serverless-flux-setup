@@ -1,3 +1,7 @@
+import base64
+import io
+
+from PIL import Image
 from vastai import (
     Worker,
     WorkerConfig,
@@ -8,10 +12,12 @@ from vastai import (
 
 
 MODEL_SERVER_URL = "http://127.0.0.1"
-
 MODEL_SERVER_PORT = 18000
-
 MODEL_LOG_FILE = "/app/app.log"
+
+DEFAULT_HEIGHT = 768
+DEFAULT_WIDTH = 1024
+DEFAULT_PIXELS = DEFAULT_HEIGHT * DEFAULT_WIDTH
 
 
 # ============================================================
@@ -21,20 +27,25 @@ MODEL_LOG_FILE = "/app/app.log"
 
 def benchmark_generator():
     """
-    Small representative request used by Vast to measure
-    how quickly this worker can process requests.
+    Representative request used by Vast to measure how quickly
+    this worker can process a typical FLUX edit job.
     """
+    image = Image.new("RGB", (DEFAULT_WIDTH, DEFAULT_HEIGHT), (90, 90, 90))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
 
     return {
-        "image": (
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
-            "CAQAAAC1HAwCAAAAC0lEQVR42mNk"
-            "+g8AAQUBAScY42YAAAAASUVORK5CYII="
-        ),
-        "prompt": "test",
-        "height": 512,
-        "width": 512,
+        "image": base64.b64encode(buf.getvalue()).decode("utf-8"),
+        "prompt": "a photo of a red apple on a wooden table, natural lighting",
+        "height": DEFAULT_HEIGHT,
+        "width": DEFAULT_WIDTH,
     }
+
+
+def workload_calculator(payload: dict) -> float:
+    height = int(payload.get("height", DEFAULT_HEIGHT))
+    width = int(payload.get("width", DEFAULT_WIDTH))
+    return (height * width) / DEFAULT_PIXELS
 
 
 # ============================================================
@@ -48,32 +59,22 @@ worker_config = WorkerConfig(
     handlers=[
         HandlerConfig(
             route="/generate",
-            # Your GPU runs one image at a time.
             allow_parallel_requests=False,
-            # Maximum time a request can wait in the worker queue.
             max_queue_time=120.0,
-            # One request = one unit of workload.
-            workload_calculator=lambda payload: 1.0,
+            workload_calculator=workload_calculator,
             benchmark_config=BenchmarkConfig(
                 generator=benchmark_generator,
-                # Keep this low initially because FLUX inference
-                # is relatively expensive.
                 runs=3,
                 concurrency=1,
             ),
         )
     ],
     log_action_config=LogActionConfig(
-        # Our FastAPI process prints this after the model
-        # has loaded AND warmup has finished.
         on_load=[
             "VAST_MODEL_READY",
         ],
-        # Errors that should mark the worker as failed.
         on_error=[
-            "Traceback (most recent call last):",
-            "RuntimeError",
-            "CUDA out of memory",
+            "VAST_WORKER_FATAL",
         ],
     ),
 )
