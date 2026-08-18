@@ -2,6 +2,7 @@ import base64
 import io
 import os
 import time
+import traceback
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -16,7 +17,6 @@ from pydantic import BaseModel, Field, field_validator
 
 from PIL import Image
 import torch
-from diffusers import Flux2KleinPipeline
 
 
 # ============================================================
@@ -59,6 +59,12 @@ model_ready = False
 
 torch.backends.cudnn.benchmark = True
 
+print(
+    f"FLUX API importing cwd={os.getcwd()} model={MODEL_PATH} "
+    f"cuda={torch.cuda.is_available()} device={device}",
+    flush=True,
+)
+
 
 # ============================================================
 # Request model for Serverless
@@ -100,6 +106,18 @@ class GenerateRequest(BaseModel):
 
 def emit_fatal(message: str) -> None:
     print(f"VAST_WORKER_FATAL: {message}", flush=True)
+    logger.error(message)
+
+
+def pick_dtype():
+    bf16_ok = device == "cuda" and bool(
+        getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+    )
+    if bf16_ok:
+        return torch.bfloat16
+    if device == "cuda":
+        return torch.float16
+    return torch.float32
 
 
 def check_dimension(value: int, name: str = "dimension") -> int:
@@ -169,69 +187,108 @@ def require_model():
 # ============================================================
 
 
+def load_pipeline_class():
+    try:
+        from diffusers import Flux2KleinPipeline
+
+        return Flux2KleinPipeline
+    except ImportError as exc:
+        print(
+            f"Flux2KleinPipeline unavailable ({exc}); "
+            "trying DiffusionPipeline.from_pretrained",
+            flush=True,
+        )
+        try:
+            from diffusers import DiffusionPipeline
+
+            return DiffusionPipeline
+        except ImportError as inner:
+            emit_fatal(
+                "cannot import Flux2KleinPipeline or DiffusionPipeline; "
+                f"install diffusers>=0.37.0 ({inner})"
+            )
+            raise
+
+
 def load_and_warmup() -> None:
-    global pipe
+    global pipe, model_ready
+
+    if not torch.cuda.is_available():
+        emit_fatal("CUDA is not available; this worker requires a GPU")
+        return
 
     if not os.path.isdir(MODEL_PATH):
         emit_fatal(f"model directory missing: {MODEL_PATH}")
-        raise RuntimeError(f"model directory missing: {MODEL_PATH}")
+        return
 
+    entries = os.listdir(MODEL_PATH)
+    if not entries:
+        emit_fatal(f"model directory empty: {MODEL_PATH}")
+        return
+
+    dtype = pick_dtype()
+    print(
+        f"Loading FLUX.2-klein-4B from {MODEL_PATH} "
+        f"device={device} dtype={dtype} files={len(entries)}",
+        flush=True,
+    )
     logger.warning("Loading FLUX.2-klein-4B from %s", MODEL_PATH)
 
     try:
-        loaded = Flux2KleinPipeline.from_pretrained(
+        pipeline_cls = load_pipeline_class()
+        loaded = pipeline_cls.from_pretrained(
             MODEL_PATH,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
             local_files_only=True,
         )
         loaded.to(device)
         pipe = loaded
+        print(f"Model moved to {device}", flush=True)
         logger.warning("Model moved to %s", device)
     except Exception as exc:
         emit_fatal(f"model load failed: {exc}")
-        raise
+        traceback.print_exc()
+        return
 
-    if device == "cuda":
-        try:
-            logger.warning("Warmup run...")
-            dummy = Image.new("RGB", (512, 512), "white")
-            with torch.inference_mode():
-                pipe(
-                    image=dummy,
-                    prompt="test",
-                    num_inference_steps=1,
-                    guidance_scale=GUIDANCE_SCALE,
-                    height=512,
-                    width=512,
-                )
-            torch.cuda.synchronize()
-            logger.warning("Warmup done")
-        except Exception as exc:
-            emit_fatal(f"warmup failed: {exc}")
-            raise
+    try:
+        print("Warmup run...", flush=True)
+        logger.warning("Warmup run...")
+        dummy = Image.new("RGB", (512, 512), "white")
+        with torch.inference_mode():
+            pipe(
+                image=dummy,
+                prompt="test",
+                num_inference_steps=1,
+                guidance_scale=GUIDANCE_SCALE,
+                height=512,
+                width=512,
+            )
+        torch.cuda.synchronize()
+        print("Warmup done", flush=True)
+        logger.warning("Warmup done")
+    except Exception as exc:
+        emit_fatal(f"warmup failed: {exc}")
+        traceback.print_exc()
+        return
+
+    model_ready = True
+    print("VAST_MODEL_READY", flush=True)
 
 
-async def emit_ready_when_listening() -> None:
-    global model_ready
-
-    for _ in range(100):
-        try:
-            reader, writer = await asyncio.open_connection(API_HOST, API_PORT)
-            writer.close()
-            await writer.wait_closed()
-            model_ready = True
-            print("VAST_MODEL_READY", flush=True)
-            return
-        except OSError:
-            await asyncio.sleep(0.1)
-
-    emit_fatal(f"FastAPI did not start listening on {API_HOST}:{API_PORT}")
+def load_and_warmup_safe() -> None:
+    try:
+        load_and_warmup()
+    except Exception as exc:
+        emit_fatal(f"model load crashed: {exc}")
+        traceback.print_exc()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    load_and_warmup()
-    asyncio.create_task(emit_ready_when_listening())
+    # Bind HTTP first. A raise here used to kill uvicorn, so Vast never
+    # started PyWorker and sat in model_loading until timeout.
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(executor, load_and_warmup_safe)
     yield
 
 
@@ -336,7 +393,8 @@ def root():
 @app.get("/health")
 def health():
     return {
-        "ok": model_ready,
+        "ok": True,
+        "model_ready": model_ready,
         "device": device,
         "model_path": MODEL_PATH,
     }
