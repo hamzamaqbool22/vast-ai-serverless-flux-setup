@@ -1,1 +1,8 @@
+diffusers
+transformers
+accelerate
+safetensors
 Pillow
+fastapi
+uvicorn
+python-multipart
